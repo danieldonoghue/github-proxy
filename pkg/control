@@ -1,0 +1,8 @@
+Package: debuglog
+Version: VERSION
+Section: utils
+Priority: optional
+Architecture: ARCH
+Maintainer: Daniel Donoghue <daniel.donoghue@aurorainnovation.com>
+Homepage: https://github.com/aurorainnovation/debuglog
+Description: enhanced log filtering and hilighting with grok pattern evaluation

@@ -1,0 +1,72 @@
+name: Build and Publish Debian Package
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger on version tags
+
+env:
+  GO_VERSION: '1.23.3'
+  DEBIAN_REPO: 'aurorainnovation/telephony-debian-repo'
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Read package variables
+        id: package-name
+        run: echo "package-name=$(grep '^Package:' pkg/control | awk '{print $2}')" >> $GITHUB_OUTPUT
+
+      - id: release-version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+    outputs:
+      release-version: ${{ steps.release-version.outputs.version }}
+      package-name: ${{ steps.package-name.outputs.package-name }}
+            
+  build-and-publish:
+    runs-on: ubuntu-latest
+    needs: setup
+
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build assets
+        uses: aurorainnovation/actions/build-debian-package@v1
+        id: build-assets
+        with:
+          package-name: ${{ needs.setup.outputs.package-name }}
+          package-version: ${{ needs.setup.outputs.release-version }}
+          build-arch: ${{ matrix.arch }}
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Publish package
+        uses: aurorainnovation/actions/publish-debian-package@v1
+        with:
+          debian-repository: ${{ env.DEBIAN_REPO }}
+          debian-package: ${{ steps.build-assets.outputs.debian-package }}
+          app-id: ${{ vars.SIR_COMMITALOT_CLIENT_ID }}
+          private-key: ${{ secrets.SIR_COMMITALOT_KEY }}
+
+  release:
+    name: Create github release
+    needs: [ setup, build-and-publish ]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Generate Release
+        uses: aurorainnovation/actions/generate-release@v1
+        with:
+          release-name: Release ${{ needs.setup.outputs.release-version }}
+          tag-name: ${{ github.ref_name }}
+          app-id: ${{ vars.SIR_COMMITALOT_CLIENT_ID }}
+          private-key: ${{ secrets.SIR_COMMITALOT_KEY }}
