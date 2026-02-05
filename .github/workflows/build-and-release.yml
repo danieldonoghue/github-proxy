@@ -51,7 +51,7 @@ jobs:
           GOOS=${{ matrix.os }} GOARCH=${{ matrix.arch }} go build -o output/github-proxy_${{ matrix.os }}_${{ matrix.arch }} -ldflags "-X main.Version=${{ needs.setup.outputs.release-version }}" cmd/github-proxy/*.go
 
       - name: Upload binary artifact
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.os }}-${{ matrix.arch }}
           path: output/*

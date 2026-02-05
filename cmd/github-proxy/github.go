@@ -252,55 +252,81 @@ type lfsBatchError struct {
 }
 
 func downloadLFSObject(owner, repo, token string, pointer *lfsPointer) ([]byte, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/lfs/objects/batch", owner, repo)
 	reqBody := lfsBatchRequest{
 		Operation: "download",
 		Objects:   []lfsBatchObject{{OID: pointer.OID, Size: pointer.Size}},
 	}
 
+	action, err := requestLFSBatchAction(fmt.Sprintf("https://api.github.com/repos/%s/%s/git/lfs/objects/batch", owner, repo), token, reqBody, false)
+	if err != nil {
+		if !strings.Contains(err.Error(), "404") {
+			return nil, err
+		}
+
+		action, err = requestLFSBatchAction(fmt.Sprintf("https://github.com/%s/%s.git/info/lfs/objects/batch", owner, repo), token, reqBody, true)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return downloadLFSAction(action)
+}
+
+func requestLFSBatchAction(url, token string, reqBody lfsBatchRequest, useBasicAuth bool) (lfsBatchAction, error) {
 	bodyBytes, err := json.Marshal(reqBody)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode LFS batch request: %w", err)
+		return lfsBatchAction{}, fmt.Errorf("failed to encode LFS batch request: %w", err)
 	}
 
 	req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create LFS batch request: %w", err)
+		return lfsBatchAction{}, fmt.Errorf("failed to create LFS batch request: %w", err)
 	}
-	req.Header.Set("Authorization", "Bearer "+token)
+	if useBasicAuth {
+		creds := "x-access-token:" + token
+		encoded := base64.StdEncoding.EncodeToString([]byte(creds))
+		req.Header.Set("Authorization", "Basic "+encoded)
+	} else {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
 	req.Header.Set("Accept", "application/vnd.git-lfs+json")
 	req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to request LFS batch: %w", err)
+		return lfsBatchAction{}, fmt.Errorf("failed to request LFS batch: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to request LFS batch: %s", resp.Status)
+		return lfsBatchAction{}, fmt.Errorf("failed to request LFS batch: %s", resp.Status)
 	}
 
 	var batchResp lfsBatchResponse
 	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
-		return nil, fmt.Errorf("failed to parse LFS batch response: %w", err)
+		return lfsBatchAction{}, fmt.Errorf("failed to parse LFS batch response: %w", err)
 	}
 
 	if len(batchResp.Objects) == 0 {
-		return nil, fmt.Errorf("LFS batch response missing objects")
+		return lfsBatchAction{}, fmt.Errorf("LFS batch response missing objects")
 	}
 
 	obj := batchResp.Objects[0]
 	if obj.Error != nil {
-		return nil, fmt.Errorf("LFS error %d: %s", obj.Error.Code, obj.Error.Message)
+		return lfsBatchAction{}, fmt.Errorf("LFS error %d: %s", obj.Error.Code, obj.Error.Message)
 	}
 
 	action, ok := obj.Actions["download"]
 	if !ok || action.Href == "" {
-		return nil, fmt.Errorf("LFS download action missing")
+		return lfsBatchAction{}, fmt.Errorf("LFS download action missing")
 	}
 
+	return action, nil
+}
+
+func downloadLFSAction(action lfsBatchAction) ([]byte, error) {
+	client := &http.Client{}
 	downloadReq, err := http.NewRequest("GET", action.Href, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create LFS download request: %w", err)
