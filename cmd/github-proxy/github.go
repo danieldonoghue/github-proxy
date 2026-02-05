@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
@@ -10,6 +11,8 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -159,6 +162,13 @@ func GetFileContent(owner, repo, path, token string) ([]byte, string, error) {
 		}
 	}
 
+	if lfsPointer, ok := parseLFSPointer(content); ok {
+		content, err = downloadLFSObject(owner, repo, token, lfsPointer)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to download LFS object: %w", err)
+		}
+	}
+
 	// Identify content type
 	contentType := mime.TypeByExtension(ext)
 	if contentType == "" {
@@ -173,6 +183,148 @@ func GetFileContent(owner, repo, path, token string) ([]byte, string, error) {
 	log.Printf("serving filename: %s, Size: %d bytes, File type: %v\n", fileData.Name, fileData.Size, contentType)
 
 	return content, contentType, nil
+}
+
+type lfsPointer struct {
+	OID  string
+	Size int64
+}
+
+func parseLFSPointer(content []byte) (*lfsPointer, bool) {
+	text := strings.TrimSpace(string(content))
+	if !strings.HasPrefix(text, "version https://git-lfs.github.com/spec/v1") {
+		return nil, false
+	}
+
+	var oid string
+	var size int64
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "oid sha256:") {
+			oid = strings.TrimPrefix(line, "oid sha256:")
+			continue
+		}
+		if strings.HasPrefix(line, "size ") {
+			val := strings.TrimPrefix(line, "size ")
+			parsed, err := strconv.ParseInt(val, 10, 64)
+			if err == nil {
+				size = parsed
+			}
+		}
+	}
+
+	if oid == "" || size <= 0 {
+		return nil, false
+	}
+
+	return &lfsPointer{OID: oid, Size: size}, true
+}
+
+type lfsBatchRequest struct {
+	Operation string           `json:"operation"`
+	Objects   []lfsBatchObject `json:"objects"`
+}
+
+type lfsBatchObject struct {
+	OID  string `json:"oid"`
+	Size int64  `json:"size"`
+}
+
+type lfsBatchResponse struct {
+	Objects []lfsBatchResponseObject `json:"objects"`
+}
+
+type lfsBatchResponseObject struct {
+	OID     string                    `json:"oid"`
+	Size    int64                     `json:"size"`
+	Actions map[string]lfsBatchAction `json:"actions"`
+	Error   *lfsBatchError            `json:"error"`
+}
+
+type lfsBatchAction struct {
+	Href   string            `json:"href"`
+	Header map[string]string `json:"header"`
+}
+
+type lfsBatchError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+func downloadLFSObject(owner, repo, token string, pointer *lfsPointer) ([]byte, error) {
+	url := fmt.Sprintf("https://api.github.com/repos/%s/%s/git/lfs/objects/batch", owner, repo)
+	reqBody := lfsBatchRequest{
+		Operation: "download",
+		Objects:   []lfsBatchObject{{OID: pointer.OID, Size: pointer.Size}},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode LFS batch request: %w", err)
+	}
+
+	req, err := http.NewRequest("POST", url, bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create LFS batch request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Accept", "application/vnd.git-lfs+json")
+	req.Header.Set("Content-Type", "application/vnd.git-lfs+json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to request LFS batch: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to request LFS batch: %s", resp.Status)
+	}
+
+	var batchResp lfsBatchResponse
+	if err := json.NewDecoder(resp.Body).Decode(&batchResp); err != nil {
+		return nil, fmt.Errorf("failed to parse LFS batch response: %w", err)
+	}
+
+	if len(batchResp.Objects) == 0 {
+		return nil, fmt.Errorf("LFS batch response missing objects")
+	}
+
+	obj := batchResp.Objects[0]
+	if obj.Error != nil {
+		return nil, fmt.Errorf("LFS error %d: %s", obj.Error.Code, obj.Error.Message)
+	}
+
+	action, ok := obj.Actions["download"]
+	if !ok || action.Href == "" {
+		return nil, fmt.Errorf("LFS download action missing")
+	}
+
+	downloadReq, err := http.NewRequest("GET", action.Href, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create LFS download request: %w", err)
+	}
+	for key, value := range action.Header {
+		downloadReq.Header.Set(key, value)
+	}
+
+	downloadResp, err := client.Do(downloadReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download LFS object: %w", err)
+	}
+	defer downloadResp.Body.Close()
+
+	if downloadResp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to download LFS object: %s", downloadResp.Status)
+	}
+
+	content, err := io.ReadAll(downloadResp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read LFS download response: %w", err)
+	}
+
+	return content, nil
 }
 
 type RateLimit struct {
