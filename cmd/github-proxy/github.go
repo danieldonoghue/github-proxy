@@ -136,23 +136,28 @@ func GetFileContent(owner, repo, path, token string) ([]byte, string, error) {
 	ext := filepath.Ext(fileData.Name)
 	var content []byte
 
-	// For files larger than 1MB, use the download_url
-	if fileData.Size > 1024*1024 {
-		req, err = http.NewRequest("GET", fileData.DownloadURL, nil)
+	// For larger files, request raw content to avoid auth/redirect issues.
+	if fileData.Size > 1024*1024 || fileData.Content == "" {
+		req, err = http.NewRequest("GET", url, nil)
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to create download request: %w", err)
+			return nil, "", fmt.Errorf("failed to create raw download request: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
+		req.Header.Set("Accept", "application/vnd.github.raw")
 
 		resp, err = client.Do(req)
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to download file: %w", err)
+			return nil, "", fmt.Errorf("failed to download raw file: %w", err)
 		}
 		defer resp.Body.Close()
 
+		if resp.StatusCode != http.StatusOK {
+			return nil, "", fmt.Errorf("failed to download raw file: %s", resp.Status)
+		}
+
 		content, err = io.ReadAll(resp.Body)
 		if err != nil {
-			return nil, "", fmt.Errorf("failed to read download response: %w", err)
+			return nil, "", fmt.Errorf("failed to read raw download response: %w", err)
 		}
 	} else {
 		// Decode the Base64-encoded content
